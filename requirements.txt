@@ -1,3 +1,4 @@
-fastapi[standard]
-x402[fastapi]
+fastapi
+uvicorn
+x402[evm,svm,fastapi]
 aiohttp

@@ -2,57 +2,45 @@ import os
 import asyncio
 import aiohttp
 from fastapi import FastAPI, HTTPException
-from x402 import x402ResourceServer
-from x402.http import HTTPFacilitatorClient
-from x402.http.middleware.fastapi import payment_middleware
+from x402.server import x402ResourceServer
+from x402.http import HTTPFacilitatorClient, FacilitatorConfig, PaymentOption
+from x402.http.middleware.fastapi import PaymentMiddlewareASGI
+from x402.http.types import RouteConfig
 from x402.mechanisms.svm.exact import ExactSvmServerScheme
-from x402.mechanisms.evm.exact import ExactEvmServerScheme
 
 app = FastAPI(
     title="God's Eye Solana Token Risk & Bundle Telemetry API",
-    description="Real-time on-chain Top-10 holder bundle detection, genesis deployer audit, and DEX liquidity velocity for AI trading agents.",
+    description="Real-time on-chain Top-10 holder bundle detection and DEX liquidity velocity for AI trading agents.",
     version="2.0.0",
 )
 
 SOLANA_PAY_TO = os.environ["SOLANA_WALLET_ADDRESS"]
-EVM_PAY_TO = os.environ.get("EVM_WALLET_ADDRESS", "")
 RPC_ENDPOINT = os.environ.get("SOLANA_RPC_ENDPOINT", "https://api.mainnet-beta.solana.com")
-FACILITATOR_URL = os.environ.get("X402_FACILITATOR_URL", "https://x402.org/facilitator")
+FACILITATOR_URL = os.environ.get("X402_FACILITATOR_URL", "https://facilitator.payai.network")
+SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
 
-# Configure x402 V2 Resource Server (Solana Mainnet + Base Mainnet)
-facilitator = HTTPFacilitatorClient(url=FACILITATOR_URL)
+# 1. Configure x402 V2 Resource Server for Solana Mainnet
+facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
 resource_server = x402ResourceServer(facilitator)
-resource_server.register("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", ExactSvmServerScheme())
-if EVM_PAY_TO:
-    resource_server.register("eip155:8453", ExactEvmServerScheme())
+resource_server.register(SOLANA_MAINNET_CAIP2, ExactSvmServerScheme())
 
-# Protect the /v1/audit/{mint} endpoint at $0.03 USDC per request
+# 2. Gate /v1/audit/* behind a $0.03 USDC Solana micropayment
 routes = {
-    "GET /v1/audit/*": {
-        "accepts": [
-            {
-                "scheme": "exact",
-                "price": "$0.03",
-                "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-                "payTo": SOLANA_PAY_TO,
-            }
+    "GET /v1/audit/*": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                price="$0.03",
+                network=SOLANA_MAINNET_CAIP2,
+                pay_to=SOLANA_PAY_TO,
+            )
         ],
-        "description": "On-chain Solana mint sniper-bundle audit, deployer history, and DEX liquidity check",
-        "mimeType": "application/json",
-    }
+        description="On-chain Solana mint sniper-bundle audit and DEX liquidity check",
+        mime_type="application/json",
+    )
 }
 
-if EVM_PAY_TO:
-    routes["GET /v1/audit/*"]["accepts"].append(
-        {
-            "scheme": "exact",
-            "price": "$0.03",
-            "network": "eip155:8453",
-            "payTo": EVM_PAY_TO,
-        }
-    )
-
-app.middleware("http")(payment_middleware(routes, resource_server))
+app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=resource_server)
 
 async def inspect_holders(session: aiohttp.ClientSession, mint: str) -> dict:
     payload = {"jsonrpc": "2.0", "id": 1, "method": "getTokenLargestAccounts", "params": [mint]}
@@ -95,7 +83,7 @@ async def inspect_dex(session: aiohttp.ClientSession, mint: str) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "online", "protocol": "x402-v2", "price_per_audit_usd": 0.03}
+    return {"status": "online", "protocol": "x402-v2", "network": SOLANA_MAINNET_CAIP2, "price_usd": 0.03}
 
 @app.get("/v1/audit/{mint}")
 async def audit_mint(mint: str):
